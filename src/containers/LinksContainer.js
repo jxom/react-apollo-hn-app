@@ -6,6 +6,7 @@ import gql from 'graphql-tag';
 import styled from 'styled-components';
 import _get from 'lodash/get';
 import _find from 'lodash/find';
+import _remove from 'lodash/remove';
 
 import LinkList from 'components/LinkList';
 
@@ -25,23 +26,34 @@ const _optimisticCreateVoteResponse = ({ userId }) => ({
     user: { id: userId, __typename: 'User' }
   }
 });
-const _updateCacheAfterVote = (store, createVote, linkId) => {
+const _optimisticDeleteVoteResponse = ({ id }) => ({
+  _typename: 'Mutation',
+  deleteVote: {
+    _typename: 'Vote',
+    id
+  }
+});
+const _updateCacheAfterVoteMutation = ({ store, vote, linkId, isDelete }) => {
   const data = store.readQuery({ query: ALL_LINKS_QUERY });
   const votedLink = data.allLinks.find(link => link.id === linkId);
-  votedLink.votes = createVote.link.votes;
+  if (isDelete) {
+    _remove(votedLink.votes, { id: vote.id });
+  } else {
+    votedLink.votes = vote.link.votes;
+  }
   store.writeQuery({ query: ALL_LINKS_QUERY, data });
 };
 
 class LinksContainer extends Component {
   static propTypes = {
-    allLinksData: PropTypes.object,
+    allLinksQuery: PropTypes.object,
     history: PropTypes.object.isRequired,
     isLoggedIn: PropTypes.bool,
     userId: PropTypes.string.isRequired
   };
 
   static defaultProps = {
-    allLinksData: {},
+    allLinksQuery: {},
     isLoggedIn: false
   };
 
@@ -50,35 +62,41 @@ class LinksContainer extends Component {
   handleClickAddLink = () => this.props.history.push('/create');
 
   handleVoteLink = async ({ id, votes }) => {
-    const { createVoteData, userId } = this.props;
+    const { createVoteMutation, removeVoteMutation, userId } = this.props;
     const { isVoting } = this.state;
-    const voterIds = votes.map(vote => vote.user.id);
+    const userVote = _find(votes, { user: { id: userId } });
 
     if (isVoting) {
       return null;
     }
 
     this.setState({ isVoting: true });
-
-    // TODO: Make this a operationBefore hook in graph cool. Don't handle on client.
-    if (voterIds.includes(userId)) {
-      console.log(`User (${userId}) already voted for this link.`);
-      this.setState({ isVoting: false });
-      return null;
-    }
-
     const linkId = id;
-    // TODO: Handle error
-    await createVoteData({
-      variables: {
-        userId,
-        linkId
-      },
-      optimisticResponse: _optimisticCreateVoteResponse({ userId }),
-      update: (store, { data: { createVote } }) => {
-        _updateCacheAfterVote(store, createVote, linkId);
-      }
-    });
+    // TODO: Make this a operationBefore hook in graph cool. Don't handle on client.
+    if (userVote) {
+      // TODO: Handle error
+      await removeVoteMutation({
+        variables: {
+          id: userVote.id
+        },
+        optimisticResponse: _optimisticDeleteVoteResponse({ id: userVote.id }),
+        update: (store, { data: { deleteVote } }) => {
+          _updateCacheAfterVoteMutation({ store, vote: deleteVote, linkId, isDelete: true });
+        }
+      });
+    } else {
+      // TODO: Handle error
+      await createVoteMutation({
+        variables: {
+          userId,
+          linkId
+        },
+        optimisticResponse: _optimisticCreateVoteResponse({ userId }),
+        update: (store, { data: { createVote } }) => {
+          _updateCacheAfterVoteMutation({ store, vote: createVote, linkId });
+        }
+      });
+    }
     this.setState({ isVoting: false });
   };
 
@@ -88,7 +106,7 @@ class LinksContainer extends Component {
   };
 
   render() {
-    const { allLinksData, isLoggedIn } = this.props;
+    const { allLinksQuery, isLoggedIn } = this.props;
     return (
       <div>
         {isLoggedIn && (
@@ -96,13 +114,13 @@ class LinksContainer extends Component {
             Add a link
           </AddButton>
         )}
-        {allLinksData.loading && <div>Loading</div>}
-        {allLinksData.error && <div>Error</div>}
-        {!allLinksData.loading &&
-          !allLinksData.error &&
-          allLinksData.allLinks && (
+        {allLinksQuery.loading && <div>Loading</div>}
+        {allLinksQuery.error && <div>Error</div>}
+        {!allLinksQuery.loading &&
+          !allLinksQuery.error &&
+          allLinksQuery.allLinks && (
             <LinkList
-              links={allLinksData.allLinks}
+              links={allLinksQuery.allLinks}
               hasUserVoted={this.hasUserVoted}
               onClickVote={this.handleVoteLink}
             />
@@ -150,13 +168,21 @@ const CREATE_VOTE_MUTATION = gql`
     }
   }
 `;
+const DELETE_VOTE_MUTATION = gql`
+  mutation DeleteVoteMutation($id: ID!) {
+    deleteVote(id: $id) {
+      id
+    }
+  }
+`;
 
 export default connect(state => ({
   isLoggedIn: Boolean(_get(state, 'user.id')),
   userId: _get(state, 'user.id')
 }))(
   compose(
-    graphql(ALL_LINKS_QUERY, { name: 'allLinksData' }),
-    graphql(CREATE_VOTE_MUTATION, { name: 'createVoteData' })
+    graphql(ALL_LINKS_QUERY, { name: 'allLinksQuery' }),
+    graphql(CREATE_VOTE_MUTATION, { name: 'createVoteMutation' }),
+    graphql(DELETE_VOTE_MUTATION, { name: 'removeVoteMutation' })
   )(LinksContainer)
 );
